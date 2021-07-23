@@ -49,6 +49,7 @@ TCP连接的建立采用客户机／服务器模式，主动发起连接建立�
 
 #### TCP连接的建立过程
 
+[picture1]
 <img src="D:\workkkkkkkk\资料\LearningNotes-master\Network\三次握手.png" style="zoom:80%;" />
 
 －客户机：服务器，我想要和你建立连接，你同意吗？（SYN＝１）
@@ -63,6 +64,7 @@ TCP连接的建立采用客户机／服务器模式，主动发起连接建立�
 
 #### TCP连接的释放过程
 
+[picture2]
 <img src="D:\workkkkkkkk\资料\LearningNotes-master\Network\四次挥手.png" style="zoom:80%;" />
 
 -客户机：服务器，我想和你断开连接，你同意吗？（FIN=1）
