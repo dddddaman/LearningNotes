@@ -495,3 +495,174 @@ merge的流程：
 3. 写 redo log。这个 redo log 包含了数据的变更和 change buffer 的变更。
 
 到这里 merge 过程就结束了。这时候，数据页和内存中 change buffer 对应的磁盘位置都还没有修改，属于脏页，之后各自刷回自己的物理数据，就是另外一个过程了。
+
+## 10 | MySQL为什么有时候会选错索引？
+
+```mysql
+//创建一个表
+CREATE TABLE `t` ( 
+    `id` int(11) NOT NULL, 
+    `a` int(11) DEFAULT NULL, 
+    `b` int(11) DEFAULT NULL, 
+    PRIMARY KEY (`id`), 
+    KEY `a` (`a`), 
+    KEY `b` (`b`)
+) ENGINE=InnoDB；
+
+//我们往表 t 中插入 10 万行记录，取值按整数递增，即：(1,1,1)，(2,2,2)，(3,3,3) 直到 (100000,100000,100000)
+delimiter ;;
+create procedure idata()
+begin
+  declare i int;
+  set i=1;
+  while(i<=100000)do
+    insert into t values(i, i, i);
+    set i=i+1;
+  end while;
+end;;
+delimiter ;
+call idata();
+
+//查询数据
+mysql> select * from t where a between 10000 and 20000;
+```
+
+使用哪个索引是由 MySQL 来确定的，确切的说是优化器的工作。
+
+
+### 优化器的逻辑
+
+优化器选择索引的目的，是找到一个最优的执行方案，并用最小的代价去执行语句。
+
+优化器选择索引的影响因素：
+
+* 查询扫描行数。扫描的行数越少，意味着访问磁盘数据的次数越少，消耗的 CPU 资源越少。
+* 是否使用临时表
+* 是否排序
+
+扫描行数的判断方法：
+
+MySQL 根据索引的“区分度”来估算记录数。一个索引上不同的值越多，这个索引的区分度就越好。
+
+* 基数（cardinality）：索引上不同值的个数。这个基数越大，索引的区分度越好。
+* 命令 “show index from T ”来查询表 T 中一个索引的基数
+
+MySQL 采样统计方法（获取索引的基数）：
+
+采样统计时，InnoDB 默认会选择 N 个数据页，统计这些页面上的不同值，得到一个平均值，然后乘以这个索引的页面数，就得到了这个索引的基数。
+
+在 MySQL 中，有两种存储索引统计的方式，可以通过设置参数 innodb_stats_persistent 的值来选择：
+
+* 设置为 on 的时候，表示统计信息会持久化存储。这时，默认的 N 是 20，M 是 10。
+* 设置为 off 的时候，表示统计信息只存储在内存中。这时，默认的 N 是 8，M 是 16。
+
+命令 ”analyze table t“，可以用来重新统计索引信息。在实践中，如果发现命令 “explain” 的结果预估的rows值跟实际情况差距比较大，可以使用这个方法处理。
+
+
+### 索引选择异常和处理
+
+大多数时候优化器都能找到正确的索引，但偶尔会选错索引。比如：原本可以执行得很快的 SQL 语句，执行速度却比你预期的慢很多，这时有以下处理方法：
+
+1. 采用force index强行选择一个索引。缺点：变更的及时性。线上系统修改SQL语句还要测试、发布等，不够敏捷。
+2. 修改语句，引导MySQL使用我们期望的索引。例如：在逻辑结果一致时可以把：order by b limit 1 改为 order by b,a limit 1（注意文章的上下文）。缺点：根据数据特征诱导了一下优化器，不具备通用性。
+3. 在有些场景下，我们可以新建一个更合适的索引，来提供给优化器做选择，或删掉误用的索引。缺点是找到更合适的索引比较难。如果误用的索引没必要存在，可以删除。
+
+```mysql
+set long_query_time=0;
+select * from t where a between 10000 and 20000; /*Q1*/
+select * from t force index(a) where a between 10000 and 20000;/*Q2*/
+```
+
+### 总结
+
+* explain：模拟优化器执行SQL查询语句，从而知道MySQL是如何处理你的SQL语句的，分析你的查询语句或是表结构的性能瓶颈
+* analyze table：解决索引统计信息不准确导致的问题
+* force index：解决优化器误判的情况
+
+### 问题
+
+前面我们在构造第一个例子的过程中，通过 session A 的配合，让 session B 删除数据后又重新插入了一遍数据，然后就发现 explain 结果中，rows 字段从 10001 变成 37000 多。而如果没有 session A 的配合，只是单独执行 delete from t 、call idata()、explain 这三句话，会看到 rows 字段其实还是 10000 左右。这是什么原因呢？
+
+答：
+
+delete 语句删掉了所有的数据，然后再通过 call idata() 插入了 10 万行数据，看上去是覆盖了原来的 10 万行。
+
+但是，session A 开启了事务并没有提交，所以之前插入的 10 万行数据是不能删除的。这样，之前的数据每一行数据都有两个版本，旧版本是 delete 之前的数据，新版本是标记为 deleted 的数据。
+
+这样，索引 a 上的数据其实就有两份。
+
+然后你会说，不对啊，主键上的数据也不能删，那没有使用 force index 的语句，使用 explain 命令看到的扫描行数为什么还是 100000 左右？（潜台词，如果这个也翻倍，也许优化器还会认为选字段 a 作为索引更合适）
+
+是的，不过这个是主键，主键是直接按照表的行数来估计的。而表的行数，优化器直接用的是 show table status 的值。这个值的计算方法，我会在后面有文章为你详细讲解。
+
+
+## 11 | 怎么给字符串字段加索引？
+
+### 前缀索引
+
+MySQL支持前缀索引，你可以定义字符串的一部分作为索引。默认地，创建时不指定长度索引就会包含整个字符串。
+
+比如，这两个在 email 字段上创建索引的语句：
+
+```mysql
+//index1 索引里面，包含了每个记录的整个字符串
+mysql> alter table SUser add index index1(email); 
+//index2 索引里面，对于每个记录都是只取前 6 个字节
+mysql> alter table SUser add index index2(email(6));
+```
+
+这两种不同的定义在数据结构和存储上的区别：
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190831153158870.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA2NTcwOTQ=,size_16,color_FFFFFF,t_70)
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190831153242687.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA2NTcwOTQ=,size_16,color_FFFFFF,t_70)
+
+
+
+```mysql
+select id,name,email from SUser where email='zhangssxyz@xxx.com';
+```
+
+分析上面语句，在两个索引的定义下是如何执行的：
+
+* 如果使用的是 index1（即 email 整个字符串的索引结构），执行顺序是这样的：
+  1. 从 index1 索引树找到满足索引值是’zhangssxyz@xxx.com’的这条记录，取得 ID2 的值；
+  2. 到主键上查到主键值是 ID2 的行，判断 email 的值是正确的，将这行记录加入结果集；
+  3. 取 index1 索引树上刚刚查到的位置的下一条记录，发现已经不满足 email='zhangssxyz@xxx.com’的条件了，循环结束。
+* 如果使用的是 index2（即 email(6) 索引结构），执行顺序是这样的：
+  1. 从 index2 索引树找到满足索引值是’zhangs’的记录，找到的第一个是 ID1；
+  2. 到主键上查到主键值是 ID1 的行，判断出 email 的值不是’zhangssxyz@xxx.com’，这行记录丢弃；
+  3. 取 index2 上刚刚查到的位置的下一条记录，发现仍然是’zhangs’，取出 ID2，再到 ID 索引上取整行然后判断，这次值对了，将这行记录加入结果集；
+  4. 重复上一步，直到在 idxe2 上取到的值不是’zhangs’时，循环结束。
+
+可以发现，使用前缀索引后，可能会导致查询语句读数据的次数变多。
+
+因此，使用前缀索引有以下特点：
+
+* 优点：前缀索引只取字符串前几位，比整个字符串索引占用空间更小。
+* 缺点：可能会增加额外的记录扫描次数。因为依据前缀查询后，要去主键索引查找判断是否正确，这时有可能前缀一样后面的字符串不一致，就需要再去字符串索引查找，这就增加了记录扫描次数（回主键查找次数）。
+* 最优方法：使用前缀索引，定义好长度，就可以做到既节省空间，又不用额外增加太多的查询成本。
+
+如何确定前缀的长度：
+
+1、统计出这个列上有多少个不同的值：
+
+```mysql
+mysql> select count(distinct email) as L from SUser;
+```
+
+2、依次取不同长度的前缀来统计不同值，看哪个值不小于 L * 95%（5%接受区分度损失比例）：
+
+```mysql
+mysql> select
+  count(distinct left(email,4)）as L4,
+  count(distinct left(email,5)）as L5,
+  count(distinct left(email,6)）as L6,
+  count(distinct left(email,7)）as L7,
+from SUser;
+```
+
+
+### 前缀索引对覆盖索引的影响
+
+使用前缀索引就用不上覆盖索引对查询性能的优化了。例如在不使用前缀索引情况下，覆盖索引含有要查询的信息，就不用回表查询ID索引了。使用了前缀索引，还需查询ID索引确认是否是要查找的记录。
