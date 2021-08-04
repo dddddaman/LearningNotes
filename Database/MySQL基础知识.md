@@ -46,18 +46,78 @@ table，是数据库的基本组成单元，所有的数据都以表格的形式
 * 相关的约束（不能为空等）
 
 #### 基本语法
+查看有哪些数据库
+
+show databases;（这个不是SQL语句，属于MySQL的命令）
+
+创建数据库
+
+creat database bjpowernode;（这个不是SQL语句，属于MySQL的命令）
+
+使用bjpowernode数据库的数据
+
+use bjpowernode;（这个不是SQL语句，属于MySQL的命令）
+
+查看当前使用的数据库中有哪些表
+
+show tables;（这个不是SQL语句，属于MySQL的命令）
+
+查看其他数据库中的表
+
+show tables from <database name>;
+
+初始化数据
+
+mysql> sourse D:\course\05-mysql\resources\bjpowernode.sql
+
+sql脚本：一个以.sql结尾的文件，文件中编写了大量的sql语句
+
+使用source命令执行sql脚本，完成初始化
 
 
 
+删除数据库
 
+drop database bjpowernode;
+
+查看表结构
+
+```mysql
+desc 表名
+desc emp;
+```
+
+查看表中的数据
 
 ```mysql
 select * from emp；//实际开发中不建议使用*，效率较低
 ```
 
+查看mysql版本
 
+C:\Users\Administrator> mysql --version
 
+C:\Users\Administrator> mysql -v
 
+查询当前使用的数据库
+
+select database();
+
+查看数据库版本
+
+select version();
+
+终止一条语句
+
+\c
+
+查看创建表的语句
+
+show create table emp;
+
+#### 简单查询
+
+select 字段 from 表名;
 
 #### 条件查询
 
